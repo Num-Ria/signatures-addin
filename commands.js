@@ -189,22 +189,29 @@ function setSignatureHtml(item, html) {
   return callAsync(item.body.setSignatureAsync.bind(item.body, html, { coercionType: Office.CoercionType.Html }));
 }
 
-function applySignatureForCurrentFrom() {
+var DIAG_ON = true; // diagnostic temporaire : ligne rouge en bas de la signature
+function diagHtml(txt) {
+  return DIAG_ON ? '<p style="color:#c00000;font:9px Arial">diag : ' + String(txt).replace(/[<>&]/g, '') + '</p>' : '';
+}
+
+function applySignatureForCurrentFrom(evName) {
   var item = Office.context.mailbox.item;
   return callAsync(item.from.getAsync.bind(item.from)).then(function (from) {
-    var sig = findSignatureFor(from && from.emailAddress);
-    if (!sig) { return null; }
+    var addr = from && from.emailAddress;
+    var sig = findSignatureFor(addr);
+    var info = evName + ' / De=' + addr + ' / ' + (sig ? 'signature trouvee' : 'AUCUNE signature');
+    if (!sig) { return DIAG_ON ? setSignatureHtml(item, diagHtml(info)) : null; }
     return removeOldSignatureImages(item)
       .then(function () { return addSignatureImages(item, sig.assets); })
-      .then(function () { return setSignatureHtml(item, sig.html); });
+      .then(function () { return setSignatureHtml(item, sig.html + diagHtml(info)); });
   });
 }
 
-function runHandler(event) {
+function runHandler(event, evName) {
   var done = false;
   var finish = function () { if (!done) { done = true; event.completed(); } };
   try {
-    applySignatureForCurrentFrom().then(finish, function (err) {
+    applySignatureForCurrentFrom(evName).then(finish, function (err) {
       console.log('Signature : échec', err && err.message ? err.message : err);
       finish();
     });
@@ -214,8 +221,8 @@ function runHandler(event) {
   }
 }
 
-function onNewMessageComposeHandler(event) { runHandler(event); }
-function onMessageFromChangedHandler(event) { runHandler(event); }
+function onNewMessageComposeHandler(event) { runHandler(event, 'Création'); }
+function onMessageFromChangedHandler(event) { runHandler(event, 'Changement De'); }
 
 Office.actions.associate('onNewMessageComposeHandler', onNewMessageComposeHandler);
 Office.actions.associate('onMessageFromChangedHandler', onMessageFromChangedHandler);
