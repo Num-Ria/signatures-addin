@@ -231,5 +231,7 @@ function runHandler(event, evName) {
 function onNewMessageComposeHandler(event) { runHandler(event, 'Création'); }
 function onMessageFromChangedHandler(event) { runHandler(event, 'Changement De'); }
 
+// Nécessaire pour qu'Outlook sur le web initialise la bibliothèque avant l'association des gestionnaires
+Office.onReady();
 Office.actions.associate('onNewMessageComposeHandler', onNewMessageComposeHandler);
 Office.actions.associate('onMessageFromChangedHandler', onMessageFromChangedHandler);
