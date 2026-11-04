@@ -194,17 +194,26 @@ function diagHtml(txt) {
   return DIAG_ON ? '<p style="color:#c00000;font:9px Arial">diag : ' + String(txt).replace(/[<>&]/g, '') + '</p>' : '';
 }
 
+var step = 'début';
 function applySignatureForCurrentFrom(evName) {
   var item = Office.context.mailbox.item;
+  step = 'lecture de De';
   return callAsync(item.from.getAsync.bind(item.from)).then(function (from) {
     var addr = from && from.emailAddress;
     var sig = findSignatureFor(addr);
     var info = evName + ' / De=' + addr + ' / ' + (sig ? 'signature trouvee' : 'AUCUNE signature');
-    if (!sig) { return DIAG_ON ? setSignatureHtml(item, diagHtml(info)) : null; }
+    if (!sig) { step = 'pose diag'; return DIAG_ON ? setSignatureHtml(item, diagHtml(info)) : null; }
+    step = 'retrait anciennes images';
     return removeOldSignatureImages(item)
-      .then(function () { return addSignatureImages(item, sig.assets); })
-      .then(function () { return setSignatureHtml(item, sig.html + diagHtml(info)); });
+      .then(function () { step = 'ajout images'; return addSignatureImages(item, sig.assets); })
+      .then(function () { step = 'pose signature'; return setSignatureHtml(item, sig.html + diagHtml(info)); });
   });
+}
+
+function reportError(evName, err) {
+  var msg = evName + ' ERREUR a l etape [' + step + '] : ' + (err && (err.message || err.code) ? (err.message || '') + ' ' + (err.code || '') : JSON.stringify(err));
+  console.log('Signature : ' + msg);
+  try { return setSignatureHtml(Office.context.mailbox.item, diagHtml(msg)).catch(function () {}); } catch (e) { return Promise.resolve(); }
 }
 
 function runHandler(event, evName) {
@@ -212,12 +221,10 @@ function runHandler(event, evName) {
   var finish = function () { if (!done) { done = true; event.completed(); } };
   try {
     applySignatureForCurrentFrom(evName).then(finish, function (err) {
-      console.log('Signature : échec', err && err.message ? err.message : err);
-      finish();
+      reportError(evName, err).then(finish, finish);
     });
   } catch (e) {
-    console.log('Signature : exception', e);
-    finish();
+    reportError(evName, e).then(finish, finish);
   }
 }
 
