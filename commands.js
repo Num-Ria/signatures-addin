@@ -189,7 +189,7 @@ function setSignatureHtml(item, html) {
   return callAsync(item.body.setSignatureAsync.bind(item.body, html, { coercionType: Office.CoercionType.Html }));
 }
 
-var DIAG_ON = true; // diagnostic temporaire : ligne rouge en bas de la signature
+var DIAG_ON = false; // diagnostic (ligne rouge sous la signature) : mettre true pour réactiver
 function diagHtml(txt) {
   return DIAG_ON ? '<p style="color:#c00000;font:9px Arial">diag : ' + String(txt).replace(/[<>&]/g, '') + '</p>' : '';
 }
@@ -213,6 +213,7 @@ function applySignatureForCurrentFrom(evName) {
 function reportError(evName, err) {
   var msg = evName + ' ERREUR a l etape [' + step + '] : ' + (err && (err.message || err.code) ? (err.message || '') + ' ' + (err.code || '') : JSON.stringify(err));
   console.log('Signature : ' + msg);
+  if (!DIAG_ON) { return Promise.resolve(); }
   try { return setSignatureHtml(Office.context.mailbox.item, diagHtml(msg)).catch(function () {}); } catch (e) { return Promise.resolve(); }
 }
 
