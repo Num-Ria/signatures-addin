@@ -164,6 +164,7 @@ function callAsync(fn, options) {
   });
 }
 
+// Retire les images de notre signature précédente ; rend le nombre d'images retirées.
 function removeOldSignatureImages(item) {
   return callAsync(item.getAttachmentsAsync.bind(item)).then(function (attachments) {
     var old = (attachments || []).filter(function (a) {
@@ -171,8 +172,16 @@ function removeOldSignatureImages(item) {
     });
     return Promise.all(old.map(function (a) {
       return callAsync(item.removeAttachmentAsync.bind(item, a.id)).catch(function () { /* déjà retiré */ });
-    }));
+    })).then(function () { return old.length; });
   });
+}
+
+// Empêche Outlook de poser sa propre signature (celle de ses Paramètres) pour ce message.
+// Pourquoi : sans cela, quand on change l'adresse « De », Outlook remet sa signature à lui
+// par-dessus la nôtre (constaté le 9 novembre 2026). API Mailbox 1.10, absente sur les vieux Outlook.
+function disableOutlookSignature(item) {
+  if (typeof item.disableClientSignatureAsync !== 'function') { return Promise.resolve(); }
+  return callAsync(item.disableClientSignatureAsync.bind(item)).catch(function () { /* sans gravité */ });
 }
 
 function addSignatureImages(item, assets) {
@@ -202,9 +211,18 @@ function applySignatureForCurrentFrom(evName) {
     var addr = from && from.emailAddress;
     var sig = findSignatureFor(addr);
     var info = evName + ' / De=' + addr + ' / ' + (sig ? 'signature trouvee' : 'AUCUNE signature');
-    if (!sig) { step = 'pose diag'; return DIAG_ON ? setSignatureHtml(item, diagHtml(info)) : null; }
-    step = 'retrait anciennes images';
-    return removeOldSignatureImages(item)
+    if (!sig) {
+      // Adresse inconnue (boîte contact…) : on ne pose rien, mais si notre signature d'une autre
+      // adresse est encore là (changement de « De »), on la retire pour ne pas l'envoyer à tort.
+      step = 'nettoyage';
+      return removeOldSignatureImages(item).then(function (removed) {
+        if (removed > 0 || DIAG_ON) { return setSignatureHtml(item, diagHtml(info)); }
+        return null;
+      });
+    }
+    step = 'blocage signature Outlook';
+    return disableOutlookSignature(item)
+      .then(function () { step = 'retrait anciennes images'; return removeOldSignatureImages(item); })
       .then(function () { step = 'ajout images'; return addSignatureImages(item, sig.assets); })
       .then(function () { step = 'pose signature'; return setSignatureHtml(item, sig.html + diagHtml(info)); });
   });
