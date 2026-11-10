@@ -243,7 +243,7 @@ function setSignatureHtml(item, html) {
   return callAsync(item.body.setSignatureAsync.bind(item.body, html, { coercionType: Office.CoercionType.Html }));
 }
 
-var DIAG_ON = true; // diagnostic (ligne rouge sous la signature) : remettre à false avant mise en service
+var DIAG_ON = false; // diagnostic (ligne rouge sous la signature) : mettre true pour réactiver
 function hostInfo() {
   try {
     var d = Office.context.diagnostics;
