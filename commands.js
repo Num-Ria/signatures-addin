@@ -143,16 +143,23 @@ function findSignatureFor(address) {
  *
  * - À la création d'un message / d'une réponse (OnNewMessageCompose) et à chaque
  *   changement de l'adresse "De" (OnMessageFromChanged), on lit l'adresse
- *   d'expédition, on retire les images de l'ancienne signature, puis on pose la
+ *   d'expédition, on met les images de signature au bon état, puis on pose la
  *   signature de la bonne société.
- * - Adresse inconnue (boîtes "contact", etc.) : on ne touche à rien.
+ * - Adresse inconnue (boîtes "contact", etc.) : on ne pose rien ; si notre signature d'une
+ *   autre adresse est encore là, on la retire.
+ * - On demande à Outlook de ne pas poser sa propre signature (disableClientSignatureAsync).
+ * - v7 (10 nov. 2026) : à la fin, on relit l'adresse « De » et les images ; si l'une a bougé
+ *   pendant le travail (autre événement en parallèle), on recommence. Un échec passager
+ *   d'Outlook est réessayé. Pourquoi : signature restée sur l'ancienne adresse, ou absente.
  *
  * Ce fichier est assemblé par build.mjs avec config.js, signature.js et les logos
  * (ASSETS_B64 est généré). Ne pas utiliser import/export ici : Outlook classique
  * ne les supporte pas dans les gestionnaires d'événements.
  */
 
+var VERSION = 'v7';
 var SIG_PREFIX = 'sig-';
+var MAX_PASSES = 3;
 
 function callAsync(fn, options) {
   return new Promise(function (resolve, reject) {
@@ -164,15 +171,63 @@ function callAsync(fn, options) {
   });
 }
 
-// Retire les images de notre signature précédente ; rend le nombre d'images retirées.
-function removeOldSignatureImages(item) {
-  return callAsync(item.getAttachmentsAsync.bind(item)).then(function (attachments) {
-    var old = (attachments || []).filter(function (a) {
-      return a.name && a.name.indexOf(SIG_PREFIX) === 0;
-    });
+function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function norm(addr) { return addr ? String(addr).trim().toLowerCase() : ''; }
+
+function readFrom(item) {
+  return callAsync(item.from.getAsync.bind(item.from)).then(function (from) {
+    return from && from.emailAddress;
+  });
+}
+
+function wantedNames(assets) {
+  return (assets || []).map(function (a) { return sigCid(a.file); });
+}
+
+// Nos images à retirer : celles d'une autre signature, et les doublons.
+function imagesToRemove(attachments, wanted) {
+  var seen = {};
+  return (attachments || []).filter(function (a) {
+    if (!a.name || a.name.indexOf(SIG_PREFIX) !== 0) { return false; }
+    if (wanted.indexOf(a.name) < 0 || seen[a.name]) { return true; }
+    seen[a.name] = true;
+    return false;
+  });
+}
+
+function getAttachments(item) {
+  return callAsync(item.getAttachmentsAsync.bind(item)).then(function (l) { return l || []; });
+}
+
+// Met les images au bon état : retire les autres et les doublons, ajoute celles qui manquent.
+// Rend le nombre d'images retirées.
+function syncImages(item, assets) {
+  var wanted = wantedNames(assets);
+  return getAttachments(item).then(function (attachments) {
+    var old = imagesToRemove(attachments, wanted);
+    var present = attachments.map(function (a) { return a.name; });
+    var missing = (assets || []).filter(function (a) { return present.indexOf(sigCid(a.file)) < 0; });
     return Promise.all(old.map(function (a) {
       return callAsync(item.removeAttachmentAsync.bind(item, a.id)).catch(function () { /* déjà retiré */ });
-    })).then(function () { return old.length; });
+    })).then(function () {
+      return missing.reduce(function (chain, asset) {
+        return chain.then(function () {
+          return callAsync(
+            item.addFileAttachmentFromBase64Async.bind(item, ASSETS_B64[asset.file], sigCid(asset.file), { isInline: true })
+          );
+        });
+      }, Promise.resolve());
+    }).then(function () { return old.length; });
+  });
+}
+
+// Vrai si les images jointes sont exactement celles de la signature voulue.
+function imagesClean(item, assets) {
+  var wanted = wantedNames(assets);
+  return getAttachments(item).then(function (attachments) {
+    if (imagesToRemove(attachments, wanted).length > 0) { return false; }
+    var names = attachments.map(function (a) { return a.name; });
+    return wanted.every(function (n) { return names.indexOf(n) >= 0; });
   });
 }
 
@@ -184,48 +239,74 @@ function disableOutlookSignature(item) {
   return callAsync(item.disableClientSignatureAsync.bind(item)).catch(function () { /* sans gravité */ });
 }
 
-function addSignatureImages(item, assets) {
-  return assets.reduce(function (chain, asset) {
-    return chain.then(function () {
-      return callAsync(
-        item.addFileAttachmentFromBase64Async.bind(item, ASSETS_B64[asset.file], sigCid(asset.file), { isInline: true })
-      );
-    });
-  }, Promise.resolve());
-}
-
 function setSignatureHtml(item, html) {
   return callAsync(item.body.setSignatureAsync.bind(item.body, html, { coercionType: Office.CoercionType.Html }));
 }
 
-var DIAG_ON = false; // diagnostic (ligne rouge sous la signature) : mettre true pour réactiver
+var DIAG_ON = true; // diagnostic (ligne rouge sous la signature) : remettre à false avant mise en service
+function hostInfo() {
+  try {
+    var d = Office.context.diagnostics;
+    return d ? (d.hostName + ' ' + d.hostVersion + ' ' + (d.platform || Office.context.platform || '')) : 'hôte ?';
+  } catch (e) { return 'hôte ?'; }
+}
+function clock() {
+  var d = new Date();
+  var p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
 function diagHtml(txt) {
-  return DIAG_ON ? '<p style="color:#c00000;font:9px Arial">diag : ' + String(txt).replace(/[<>&]/g, '') + '</p>' : '';
+  return DIAG_ON ? '<p style="color:#c00000;font:9px Arial">diag ' + VERSION + ' ' + clock() + ' : ' +
+    String(txt).replace(/[<>&]/g, '') + ' / ' + String(hostInfo()).replace(/[<>&]/g, '') + '</p>' : '';
 }
 
 var step = 'début';
-function applySignatureForCurrentFrom(evName) {
+// Un passage complet pour l'adresse « De » actuelle. Rend l'adresse utilisée et la signature.
+function applyOnce(evName, pass) {
   var item = Office.context.mailbox.item;
   step = 'lecture de De';
-  return callAsync(item.from.getAsync.bind(item.from)).then(function (from) {
-    var addr = from && from.emailAddress;
+  return readFrom(item).then(function (addr) {
     var sig = findSignatureFor(addr);
-    var info = evName + ' / De=' + addr + ' / ' + (sig ? 'signature trouvee' : 'AUCUNE signature');
+    var info = evName + ' passe ' + pass + ' / De=' + addr + ' / ' + (sig ? 'signature posée' : 'AUCUNE signature');
     if (!sig) {
       // Adresse inconnue (boîte contact…) : on ne pose rien, mais si notre signature d'une autre
       // adresse est encore là (changement de « De »), on la retire pour ne pas l'envoyer à tort.
       step = 'nettoyage';
-      return removeOldSignatureImages(item).then(function (removed) {
+      return syncImages(item, []).then(function (removed) {
         if (removed > 0 || DIAG_ON) { return setSignatureHtml(item, diagHtml(info)); }
         return null;
-      });
+      }).then(function () { return { addr: addr, sig: null }; });
     }
     step = 'blocage signature Outlook';
     return disableOutlookSignature(item)
-      .then(function () { step = 'retrait anciennes images'; return removeOldSignatureImages(item); })
-      .then(function () { step = 'ajout images'; return addSignatureImages(item, sig.assets); })
-      .then(function () { step = 'pose signature'; return setSignatureHtml(item, sig.html + diagHtml(info)); });
+      .then(function () { step = 'images'; return syncImages(item, sig.assets); })
+      .then(function () { step = 'pose signature'; return setSignatureHtml(item, sig.html + diagHtml(info)); })
+      .then(function () { return { addr: addr, sig: sig }; });
   });
+}
+
+// Recommence tant que « De » ou les images ont bougé pendant le travail (au plus MAX_PASSES fois),
+// et réessaie après un échec passager.
+function applyUntilStable(evName) {
+  var item = Office.context.mailbox.item;
+  var pass = 0;
+  function attempt() {
+    pass++;
+    return applyOnce(evName, pass).then(function (done) {
+      step = 'vérification';
+      return readFrom(item).then(function (now) {
+        if (norm(now) !== norm(done.addr)) { return false; }
+        return imagesClean(item, done.sig ? done.sig.assets : []);
+      }).then(function (stable) {
+        if (stable || pass >= MAX_PASSES) { return null; }
+        return wait(300).then(attempt);
+      });
+    }, function (err) {
+      if (pass >= MAX_PASSES) { throw err; }
+      return wait(500).then(attempt);
+    });
+  }
+  return attempt();
 }
 
 function reportError(evName, err) {
@@ -235,16 +316,21 @@ function reportError(evName, err) {
   try { return setSignatureHtml(Office.context.mailbox.item, diagHtml(msg)).catch(function () {}); } catch (e) { return Promise.resolve(); }
 }
 
+// Les événements d'un même environnement passent l'un après l'autre, jamais en même temps.
+var queue = Promise.resolve();
 function runHandler(event, evName) {
   var done = false;
   var finish = function () { if (!done) { done = true; event.completed(); } };
-  try {
-    applySignatureForCurrentFrom(evName).then(finish, function (err) {
-      reportError(evName, err).then(finish, finish);
-    });
-  } catch (e) {
-    reportError(evName, e).then(finish, finish);
-  }
+  var work = function () {
+    try {
+      return applyUntilStable(evName).then(finish, function (err) {
+        return reportError(evName, err).then(finish, finish);
+      });
+    } catch (e) {
+      return reportError(evName, e).then(finish, finish);
+    }
+  };
+  queue = queue.then(work, work);
 }
 
 function onNewMessageComposeHandler(event) { runHandler(event, 'Création'); }
