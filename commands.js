@@ -157,7 +157,7 @@ function findSignatureFor(address) {
  * ne les supporte pas dans les gestionnaires d'événements.
  */
 
-var VERSION = 'v7';
+var VERSION = 'v9';
 var SIG_PREFIX = 'sig-';
 var MAX_PASSES = 3;
 
@@ -255,9 +255,12 @@ function clock() {
   var p = function (n) { return (n < 10 ? '0' : '') + n; };
   return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
+// Diagnostic visible (ligne rouge) si DIAG_ON ; sinon une trace invisible (commentaire HTML) que
+// l'agent relit dans les mails envoyés. Elle ne contient que la version, l'heure, l'événement et
+// l'adresse d'expédition, déjà visibles dans la signature.
 function diagHtml(txt) {
-  return DIAG_ON ? '<p style="color:#c00000;font:9px Arial">diag ' + VERSION + ' ' + clock() + ' : ' +
-    String(txt).replace(/[<>&]/g, '') + ' / ' + String(hostInfo()).replace(/[<>&]/g, '') + '</p>' : '';
+  var t = 'diag ' + VERSION + ' ' + clock() + ' : ' + String(txt).replace(/[<>&-]/g, ' ') + ' / ' + String(hostInfo()).replace(/[<>&-]/g, ' ');
+  return DIAG_ON ? '<p style="color:#c00000;font:9px Arial">' + t + '</p>' : '<!-- sigtrace ' + t + ' -->';
 }
 
 var step = 'début';
@@ -297,7 +300,7 @@ function applyUntilStable(evName) {
       return readFrom(item).then(function (now) {
         if (norm(now) !== norm(done.addr)) { return false; }
         return imagesClean(item, done.sig ? done.sig.assets : []);
-      }).then(function (stable) {
+      }).catch(function () { return true; /* vérification impossible : on garde ce qui est posé */ }).then(function (stable) {
         if (stable || pass >= MAX_PASSES) { return null; }
         return wait(300).then(attempt);
       });
@@ -312,25 +315,26 @@ function applyUntilStable(evName) {
 function reportError(evName, err) {
   var msg = evName + ' ERREUR a l etape [' + step + '] : ' + (err && (err.message || err.code) ? (err.message || '') + ' ' + (err.code || '') : JSON.stringify(err));
   console.log('Signature : ' + msg);
-  if (!DIAG_ON) { return Promise.resolve(); }
+  // Rien n'a été posé (l'erreur arrive avant la pose) : on laisse au moins la trace, invisible hors diagnostic.
   try { return setSignatureHtml(Office.context.mailbox.item, diagHtml(msg)).catch(function () {}); } catch (e) { return Promise.resolve(); }
 }
 
-// Les événements d'un même environnement passent l'un après l'autre, jamais en même temps.
-var queue = Promise.resolve();
+// Pas de file d'attente entre événements (v9) : en v7, une réponse d'Outlook jamais reçue bloquait
+// la file et plus aucun message n'avait de signature. Chaque événement travaille seul ; la relecture
+// de « De » en fin de travail suffit contre les chevauchements. Garde-fou : on rend la main à
+// Outlook au plus tard après TIMEOUT_MS, même si une réponse d'Outlook n'arrive jamais.
+var TIMEOUT_MS = 20000;
 function runHandler(event, evName) {
   var done = false;
   var finish = function () { if (!done) { done = true; event.completed(); } };
-  var work = function () {
-    try {
-      return applyUntilStable(evName).then(finish, function (err) {
-        return reportError(evName, err).then(finish, finish);
-      });
-    } catch (e) {
-      return reportError(evName, e).then(finish, finish);
-    }
-  };
-  queue = queue.then(work, work);
+  setTimeout(finish, TIMEOUT_MS);
+  try {
+    applyUntilStable(evName).then(finish, function (err) {
+      reportError(evName, err).then(finish, finish);
+    });
+  } catch (e) {
+    reportError(evName, e).then(finish, finish);
+  }
 }
 
 function onNewMessageComposeHandler(event) { runHandler(event, 'Création'); }
