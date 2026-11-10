@@ -157,7 +157,7 @@ function findSignatureFor(address) {
  * ne les supporte pas dans les gestionnaires d'événements.
  */
 
-var VERSION = 'v9';
+var VERSION = 'v10';
 var SIG_PREFIX = 'sig-';
 var MAX_PASSES = 3;
 
@@ -255,12 +255,26 @@ function clock() {
   var p = function (n) { return (n < 10 ? '0' : '') + n; };
   return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
-// Diagnostic visible (ligne rouge) si DIAG_ON ; sinon une trace invisible (commentaire HTML) que
-// l'agent relit dans les mails envoyés. Elle ne contient que la version, l'heure, l'événement et
-// l'adresse d'expédition, déjà visibles dans la signature.
+// Diagnostic dans le corps du message (ligne rouge, part chez les destinataires) : seulement si DIAG_ON.
 function diagHtml(txt) {
-  var t = 'diag ' + VERSION + ' ' + clock() + ' : ' + String(txt).replace(/[<>&-]/g, ' ') + ' / ' + String(hostInfo()).replace(/[<>&-]/g, ' ');
-  return DIAG_ON ? '<p style="color:#c00000;font:9px Arial">' + t + '</p>' : '<!-- sigtrace ' + t + ' -->';
+  if (!DIAG_ON) { return ''; }
+  return '<p style="color:#c00000;font:9px Arial">diag ' + VERSION + ' ' + clock() + ' : ' +
+    String(txt).replace(/[<>&]/g, '') + ' / ' + String(hostInfo()).replace(/[<>&]/g, '') + '</p>';
+}
+
+// Diagnostic par bandeau (v10) : affiché en haut du message en cours de rédaction, visible de
+// Geoffrey seul, jamais envoyé. Pourquoi : savoir si le complément se lance et où il s'arrête,
+// sans ligne rouge chez les clients (la trace en commentaire HTML est effacée par Outlook).
+var BANDEAU_ON = true; // remettre à false une fois le diagnostic terminé
+function bandeau(txt) {
+  if (!BANDEAU_ON) { return; }
+  try {
+    var item = Office.context.mailbox.item;
+    var type = (Office.MailboxEnums && Office.MailboxEnums.ItemNotificationMessageType &&
+      Office.MailboxEnums.ItemNotificationMessageType.ErrorMessage) || 'errorMessage';
+    var msg = ('Signature ' + VERSION + ' ' + clock() + ' : ' + txt).slice(0, 150);
+    item.notificationMessages.replaceAsync('sigdiag', { type: type, message: msg }, function () {});
+  } catch (e) { /* sans gravité */ }
 }
 
 var step = 'début';
@@ -271,6 +285,7 @@ function applyOnce(evName, pass) {
   return readFrom(item).then(function (addr) {
     var sig = findSignatureFor(addr);
     var info = evName + ' passe ' + pass + ' / De=' + addr + ' / ' + (sig ? 'signature posée' : 'AUCUNE signature');
+    bandeau(evName + ' p' + pass + ', De=' + addr + (sig ? ', pose en cours' : ', adresse inconnue'));
     if (!sig) {
       // Adresse inconnue (boîte contact…) : on ne pose rien, mais si notre signature d'une autre
       // adresse est encore là (changement de « De »), on la retire pour ne pas l'envoyer à tort.
@@ -284,7 +299,7 @@ function applyOnce(evName, pass) {
     return disableOutlookSignature(item)
       .then(function () { step = 'images'; return syncImages(item, sig.assets); })
       .then(function () { step = 'pose signature'; return setSignatureHtml(item, sig.html + diagHtml(info)); })
-      .then(function () { return { addr: addr, sig: sig }; });
+      .then(function () { bandeau(evName + ' p' + pass + ', De=' + addr + ', signature posée'); return { addr: addr, sig: sig }; });
   });
 }
 
@@ -315,7 +330,8 @@ function applyUntilStable(evName) {
 function reportError(evName, err) {
   var msg = evName + ' ERREUR a l etape [' + step + '] : ' + (err && (err.message || err.code) ? (err.message || '') + ' ' + (err.code || '') : JSON.stringify(err));
   console.log('Signature : ' + msg);
-  // Rien n'a été posé (l'erreur arrive avant la pose) : on laisse au moins la trace, invisible hors diagnostic.
+  bandeau(msg);
+  if (!DIAG_ON) { return Promise.resolve(); }
   try { return setSignatureHtml(Office.context.mailbox.item, diagHtml(msg)).catch(function () {}); } catch (e) { return Promise.resolve(); }
 }
 
@@ -327,7 +343,8 @@ var TIMEOUT_MS = 20000;
 function runHandler(event, evName) {
   var done = false;
   var finish = function () { if (!done) { done = true; event.completed(); } };
-  setTimeout(finish, TIMEOUT_MS);
+  setTimeout(function () { if (!done) { bandeau(evName + ' : délai dépassé, étape [' + step + ']'); } finish(); }, TIMEOUT_MS);
+  bandeau(evName + ' : lancé');
   try {
     applyUntilStable(evName).then(finish, function (err) {
       reportError(evName, err).then(finish, finish);
